@@ -1,0 +1,16 @@
+colname,replicate,group
+A13..Area,1,RFC
+B13..Area,1,PCFT
+C13..Area,1,GR
+D13..Area,2,RFC
+E13..Area,2,PCFT
+F13..Area,2,GR
+G13..Area,3,RFC
+H13..Area,3,PCFT
+I13..Area,3,GR
+J13..Area,4,RFC
+K13..Area,4,PCFT
+L13..Area,4,GR
+M13..Area,5,RFC
+N13..Area,5,PCFT
+O13..Area,5,GR
