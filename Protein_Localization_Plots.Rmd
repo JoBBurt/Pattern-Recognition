@@ -1,0 +1,980 @@
+---
+title: "Localization of Organellar Proteins Overlay R Script"
+author: "Jordan Burton"
+date: "1/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+options(stringsAsFactors = F)
+knitr::opts_chunk$set(warning = FALSE, echo = FALSE)
+library(tidyverse)
+library(reshape2)
+library(ggplot2)
+library(gridExtra)
+library(piano)
+library(pRoloc)
+library(pRolocdata)
+library(Rtsne)
+library(gplots)
+library(RColorBrewer)
+library(knitr)
+library(kableExtra)
+library(plotly)
+library(ggpubr)
+theme_set(theme_bw(base_size = 8))
+update_geom_defaults("point", list(size = 0.7))
+```
+
+## Organellar Profiling via Mass Spectrometry
+
+```{r hyperLOPIT2017, include = FALSE}
+data("hyperLOPITU2OS2017")
+set.seed(11)
+p <- plot2D(hyperLOPITU2OS2017, method = "t-SNE")
+#nrow(p)
+```
+
+```{r Figure 1}
+## Formatting the data and plotting the hyperlopit data
+u2os <- data.frame(Accession = row.names(p), p, assignment = as.character(fData(hyperLOPITU2OS2017)$assignment), stringsAsFactors = FALSE)
+u2os$Accession <- sapply(strsplit(u2os$Accession, "-"),'[', 1)
+
+textFrame <- data.frame(x = c(30, 8, -25, -40, 40, -27, -30, 52, -25, 27, 14, 25), 
+                        y = c(22, 30, 35, 14, 4, -30, -12, -5, -2, 8, -28, -25), 
+                        text = c("Cytosol", "ER", "Golgi", "Lysosome", "Mitochondria", 
+                                 "Nucleus", "Nucleus-Chromatin", "Peroxisome", "Plasma Membrane", 
+                                 "Proteasome", "40S Ribosome", "60S Ribosome"))
+
+hyperLOPIT <- u2os %>%
+  mutate(annotated = assignment != "unknown") %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$annotated), ]}, color = grey(0.9)) +
+  geom_point(data = function(x){x[(x$annotated), ]}, aes(color = assignment)) +
+  geom_text(data = textFrame, aes(x = x, y = y, label = text), size = 1.9) +
+  scale_color_manual(values = c(brewer.pal(12, "Paired"))) +
+  labs(color = "Localization", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(#axis.text.x = element_blank(),
+        #axis.text.y = element_blank(),
+        #axis.ticks = element_blank(), 
+        legend.position = 'none')
+
+hyperLOPIT
+
+#ggsave(hyperLOPIT, file = "output/Figure_1.svg", height = 2.5, width = 3)
+#ggsave(hyperLOPIT, file = "output/Figure_1.png", height = 2.5, width = 3)
+```
+
+**Figure** 
+
+Distribution of LOPIT localized proteins for u2os cells from Thul, Akeson et al. 2017.
+_Reproduced with permission from Science._
+
+***
+
+## Mapping proteins from a BioID experiment to the LOPIT map
+
+```{r BioID data import, include=FALSE}
+Elute <- read.csv("2207/Elution_Area.csv")
+Wash01 <- read.csv("2207/Wash-1_Proteins_Area.csv")
+Wash02 <- read.csv("2207/Wash-2_Proteins_Area.csv")
+
+sampleTable <- read.csv("2207/Elution_Area_sampleTable.csv")
+group <- sampleTable$group
+sampleTable$group=as.factor(sampleTable$group)
+
+load("toolkit/ProtienLists/Protein_Lists.RData")
+```
+
+```{r BioID intensity data wrangling, include=FALSE}
+Elute$Description <- sapply(strsplit(Elute$Description, " OS"), '[', 1)
+Wash01$Description <- sapply(strsplit(Wash01$Identified.Proteins..2330., " OS"), '[', 1)
+Wash02$Description <- sapply(strsplit(Wash02$Description, " OS"), '[', 1)
+Wash01$Accession <- Wash01$Accession.Number
+
+eFrame <- dplyr::select(Elute, contains("..Area"))
+eMat <- data.matrix(eFrame)
+rownames(eMat) <- Elute$Description
+
+w1Frame <- dplyr::select(Wash01, contains("..Area"))
+w1Mat <- data.matrix(w1Frame)
+rownames(w1Mat) <- Wash01$Description
+
+w2Frame <- dplyr::select(Wash02, contains("..Area"))
+w2Mat <- data.matrix(w2Frame)
+rownames(w2Mat) <- Wash02$Description
+
+RFC   <- eMat[,sampleTable$group == "RFC"]
+PCFT  <- eMat[,sampleTable$group == "PCFT"]
+GR    <- eMat[,sampleTable$group == "GR"]
+
+RFC <-apply(RFC, 1, mean, na.rm=TRUE)
+PCFT<-apply(PCFT, 1, mean, na.rm=TRUE)
+GR  <-apply(GR, 1, mean, na.rm=TRUE)
+
+Elute$RFC <- RFC
+Elute$PCFT <- PCFT
+Elute$GR <- GR
+
+Elute$RFCsums <- rowSums(eMat[,sampleTable$group == "RFC"], na.rm = TRUE)
+Elute$PCFTsums <- rowSums(eMat[,sampleTable$group == "PCFT"], na.rm = TRUE)
+Elute$GRsums <- rowSums(eMat[,sampleTable$group == "GR"], na.rm = TRUE)
+
+Elute$RFCbins <- cut(Elute$RFCsums, breaks = unique(quantile(Elute$RFCsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+Elute$PCFTbins <- cut(Elute$PCFTsums, breaks = unique(quantile(Elute$PCFTsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+Elute$GRbins <- cut(Elute$GRsums, breaks = unique(quantile(Elute$GRsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+
+RFC   <- w1Mat[,sampleTable$group == "RFC"]
+PCFT  <- w1Mat[,sampleTable$group == "PCFT"]
+GR    <- w1Mat[,sampleTable$group == "GR"]
+
+RFC <-apply(RFC, 1, mean, na.rm=TRUE)
+PCFT<-apply(PCFT, 1, mean, na.rm=TRUE)
+GR  <-apply(GR, 1, mean, na.rm=TRUE)
+
+Wash01$RFC <- RFC
+Wash01$PCFT <- PCFT
+Wash01$GR <- GR
+
+Wash01$RFCsums <- rowSums(w1Mat[,sampleTable$group == "RFC"], na.rm = TRUE)
+Wash01$PCFTsums <- rowSums(w1Mat[,sampleTable$group == "PCFT"], na.rm = TRUE)
+Wash01$GRsums <- rowSums(w1Mat[,sampleTable$group == "GR"], na.rm = TRUE)
+
+Wash01$RFCbins <- cut(Wash01$RFCsums, breaks = unique(quantile(Wash01$RFCsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+Wash01$PCFTbins <- cut(Wash01$PCFTsums, breaks = unique(quantile(Wash01$PCFTsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+Wash01$GRbins <- cut(Wash01$GRsums, breaks = unique(quantile(Wash01$GRsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+
+RFC   <- w2Mat[,sampleTable$group == "RFC"]
+PCFT  <- w2Mat[,sampleTable$group == "PCFT"]
+GR    <- w2Mat[,sampleTable$group == "GR"]
+
+RFC <-apply(RFC, 1, mean, na.rm=TRUE)
+PCFT<-apply(PCFT, 1, mean, na.rm=TRUE)
+GR  <-apply(GR, 1, mean, na.rm=TRUE)
+
+Wash02$RFC <- RFC
+Wash02$PCFT <- PCFT
+Wash02$GR <- GR
+
+Wash02$RFCsums <- rowSums(w2Mat[,sampleTable$group == "RFC"], na.rm = TRUE)
+Wash02$PCFTsums <- rowSums(w2Mat[,sampleTable$group == "PCFT"], na.rm = TRUE)
+Wash02$GRsums <- rowSums(w2Mat[,sampleTable$group == "GR"], na.rm = TRUE)
+
+Wash02$RFCbins <- cut(Wash02$RFCsums, breaks = unique(quantile(Wash02$RFCsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+Wash02$PCFTbins <- cut(Wash02$PCFTsums, breaks = unique(quantile(Wash02$PCFTsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+Wash02$GRbins <- cut(Wash02$GRsums, breaks = unique(quantile(Wash02$GRsums, probs = c(0, 0.25, 0.5, 0.75, 1))))
+
+#P41440 is Folate Transporter
+
+#Elute[grepl('carboxylase', Elute$Description), ] 
+  #Accession #s P11498, P05165, Q96RQ3, Q13085
+    EluteCarb <- Elute %>% filter(
+      Accession == "P11498" |
+      Accession == "P05165" |
+      Accession == "Q96RQ3" |
+      Accession == "Q13085")
+    
+    EluteCarb <- EluteCarb[, c("Accession", "Description", "PCFT", "GR", "PCFTsums", "GRsums", "PCFTbins", "GRbins")]
+    EluteCarb <- left_join(EluteCarb, u2os, by = c("Accession" = "Accession"))
+    
+    ElutePrimary <- Elute %>% filter(
+      Accession == "P41440")
+     ElutePrimary <- ElutePrimary[, c("Accession", "Description", "PCFT", "GR", "PCFTsums", "GRsums", "PCFTbins", "GRbins")]
+     ElutePrimary <- left_join(ElutePrimary, u2os, by = c("Accession" = "Accession"))
+#Wash02[grepl('carboxylase', Wash02$Description), ] 
+  #Accession #s P11498, Q96RQ3, P05165, Q13085, Q9HCC0, P38435
+    Wash02Carb <- Wash02 %>% filter(
+      Accession == "P11498" |
+      Accession == "P05165" |
+      Accession == "Q96RQ3" |
+      Accession == "Q13085")
+    Wash02Carb <- Wash02Carb[, c("Accession", "Description", "PCFT", "GR", "PCFTsums", "GRsums", "PCFTbins", "GRbins")]  
+```
+
+```{r BioID LOPIT merger, include=FALSE}
+u2os$inElute <- u2os$Accession %in% Elute$Accession
+u2os$inWash01 <- u2os$Accession %in% Wash01$Accession
+u2os$inWash02 <- u2os$Accession %in% Wash02$Accession
+
+u2osElute <- Elute %>%
+  right_join(u2os, by = "Accession")
+
+u2osWash01 <- Wash01 %>%
+  right_join(u2os, by = "Accession")
+
+u2osWash02 <- Wash02 %>%
+  right_join(u2os, by = "Accession")
+```
+
+```{r BioID intensity plots, include = FALSE}
+#Assignments were mixed up so PCFT is really GR and vice-versa
+p3a <- u2osWash01 %>%
+  mutate(identified = !is.na(u2osWash01$PCFTbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osWash01[!is.na(u2osWash01$PCFTbins), ], aes(x = Dimension.1, y = Dimension.2, size = PCFTbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "A", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+
+p3b <- u2osWash01 %>%
+  mutate(identified = !is.na(u2osWash01$GRbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osWash01[!is.na(u2osWash01$GRbins), ], aes(x = Dimension.1, y = Dimension.2, size = GRbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "B", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none") 
+
+p3c <- u2osWash02 %>%
+  mutate(identified = !is.na(u2osWash02$PCFTbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osWash02[!is.na(u2osWash02$PCFTbins), ], aes(x = Dimension.1, y = Dimension.2, size = PCFTbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "C", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+
+p3d <- u2osWash02 %>%
+  mutate(identified = !is.na(u2osWash02$GRbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osWash02[!is.na(u2osWash02$GRbins), ], aes(x = Dimension.1, y = Dimension.2, size = GRbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  #geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "D", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+
+p3e <- u2osElute %>%
+  mutate(identified = !is.na(u2osElute$PCFTbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osElute[!is.na(u2osElute$PCFTbins), ], aes(x = Dimension.1, y = Dimension.2, size = PCFTbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  #geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) + #Not present in the data
+  scale_size_manual(values = c(0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "E", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none") 
+
+p3f <- u2osElute %>%
+  mutate(identified = !is.na(u2osElute$GRbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osElute[!is.na(u2osElute$GRbins), ], aes(x = Dimension.1, y = Dimension.2, size = GRbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "F", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+
+elutePCFTcount <- sum(!is.na(u2osElute$PCFTbins))
+eluteGRcount <- sum(!is.na(u2osElute$GRbins))
+wash01PCFTcount <- sum(!is.na(u2osWash01$PCFTbins))
+wash01GRcount <- sum(!is.na(u2osWash01$GRbins))
+wash02PCFTcount <- sum(!is.na(u2osWash02$PCFTbins))
+wash02GRcount <- sum(!is.na(u2osWash02$GRbins))
+```
+
+
+```{r}
+ggarrange(
+  p3a,
+p3b,
+p3c,
+p3d,
+p3e,
+p3f
+)
+```
+
+**Figure**
+Binned protein abundances are mapped to the LOPIT data for A) W-1 GR (`r wash01PCFTcount` proteins), B) W-1 PTFC (`r wash01GRcount` proteins), C) W-2 GR (`r wash02PCFTcount` proteins), D) W-2 PTFC (`r wash02GRcount` proteins), E) Elute GR (`r elutePCFTcount` proteins), and F) Elute PTFC (`r eluteGRcount` proteins).
+Size indicates protein abundance.
+
+***
+
+```{r BioID fold change data wrangling, include=FALSE}
+smallElute <- smallProteins <- Elute[,c("Accession", "Description","PCFT", "GR")]
+names(smallElute) <- c("Accession", "Description","Elute.PCFT", "Elute.GR")
+smallWash01<- smallWash01 <- Wash01[,c("Accession", "Description","PCFT", "GR")]
+names(smallWash01) <- c("Accession", "Description","Wash01.PCFT", "Wash01.GR")
+smallWash02<- smallWash02 <- Wash02[,c("Accession", "Description","PCFT", "GR")]
+names(smallWash02) <- c("Accession", "Description","Wash02.PCFT", "Wash02.GR")
+
+fcFrame <- full_join(smallElute, smallWash01, by = c("Accession", "Description"))
+fcFrame <- full_join(fcFrame, smallWash02, by = c("Accession", "Description"))
+
+fcFrame <- fcFrame %>%
+  mutate(ElutePCFTvsWash01PCFT = Elute.PCFT/Wash01.PCFT) %>%
+  mutate(ElutePCFTvsWash02PCFT = Elute.PCFT/Wash02.PCFT) %>%
+  mutate(EluteGRvsWash01GR = Elute.GR/Wash01.GR) %>%
+  mutate(EluteGRvsWash02GR = Elute.GR/Wash02.GR) %>%
+  mutate(Wash02vsWash01PCFT = Wash02.PCFT/Wash01.PCFT) %>%
+  mutate(Wash02GRvsWash01GR = Wash02.GR/Wash01.GR) %>%
+  mutate(EluteGRvsElutePCFT = Elute.GR/Elute.PCFT) %>%
+  mutate(Wash01GRvsWash01PCFT = Wash01.GR/Wash01.PCFT) %>%
+  mutate(Wash02GRvsWash02PCFT = Wash02.GR/Wash02.PCFT)
+
+fcFrame$ElutePCFTvsWash01PCFTbins <- cut(fcFrame$ElutePCFTvsWash01PCFT, breaks = quantile(fcFrame$ElutePCFTvsWash01PCFT, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T)) 
+fcFrame$ElutePCFTvsWash02PCFTbins = cut(fcFrame$ElutePCFTvsWash02PCFT, breaks = quantile(fcFrame$ElutePCFTvsWash02PCFT, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+fcFrame$EluteGRvsWash01GRbins = cut(fcFrame$EluteGRvsWash01GR, breaks = unique(quantile(fcFrame$EluteGRvsWash01GR, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T)))
+fcFrame$EluteGRvsWash02GRbins = cut(fcFrame$EluteGRvsWash02GR, breaks = unique(quantile(fcFrame$EluteGRvsWash02GR, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T)))
+fcFrame$Wash02vsWash01PCFTbins = cut(fcFrame$Wash02vsWash01PCFT, breaks = quantile(fcFrame$Wash02vsWash01PCFT, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+fcFrame$Wash02GRvsWash01GRbins = cut(fcFrame$Wash02GRvsWash01GR, breaks = quantile(fcFrame$Wash02GRvsWash01GR, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+fcFrame$EluteGRvsElutePCFTbins = cut(fcFrame$EluteGRvsElutePCFT, breaks = unique(quantile(fcFrame$EluteGRvsElutePCFT, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T)))
+fcFrame$Wash01GRvsWash01PCFTbins = cut(fcFrame$Wash01GRvsWash01PCFT, breaks = quantile(fcFrame$Wash01GRvsWash01PCFT, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+fcFrame$Wash02GRvsWash02PCFTbins = cut(fcFrame$Wash02GRvsWash02PCFT, breaks = quantile(fcFrame$Wash02GRvsWash02PCFT, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+
+u2osM <- left_join(u2os, fcFrame, by = c("Accession" = "Accession"))
+```
+
+```{r BioID fold change plots, include = FALSE}
+p4a <- u2osM %>%
+  mutate(identified = !is.na(u2osM$EluteGRvsWash02GRbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$EluteGRvsWash02GRbins) & u2osM$EluteGRvsWash02GR >= 3, ], aes(x = Dimension.1, y = Dimension.2, size = EluteGRvsWash02GRbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "chartreuse", alpha = 2) +
+  scale_size_manual(values = c(.75, 1.5)) +
+  labs(color = "Localization", title = "A", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none", 
+        legend.title = element_blank())
+
+p4b <- u2osM %>%
+  mutate(identified = !is.na(u2osM$ElutePCFTvsWash02PCFTbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$ElutePCFTvsWash02PCFTbins) & u2osM$ElutePCFTvsWash02PCFT >= 3, ], aes(x = Dimension.1, y = Dimension.2, size = ElutePCFTvsWash02PCFTbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(.75, 1.5)) +
+  labs(color = "Localization", title = "B", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(0.8,0.2), 
+        legend.title = element_blank()) 
+
+p4c <- u2osM %>%
+  mutate(identified = !is.na(u2osM$Wash02GRvsWash02PCFTbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$Wash02GRvsWash02PCFTbins) & u2osM$Wash02GRvsWash02PCFT >= 3, ], aes(x = Dimension.1, y = Dimension.2, size = Wash02GRvsWash02PCFTbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(.75, 1.5)) +
+  labs(color = "Localization", title = "C", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(0.8,0.2), 
+        legend.title = element_blank())
+
+p4d <- u2osM %>%
+  mutate(identified = !is.na(u2osM$EluteGRvsElutePCFTbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$EluteGRvsElutePCFTbins) & u2osM$EluteGRvsElutePCFT >= 3, ], aes(x = Dimension.1, y = Dimension.2, size = EluteGRvsElutePCFTbins),
+             color = "blue", alpha = 0.2) +
+  geom_point(data = EluteCarb, aes(x = Dimension.1, y = Dimension.2), color = "red", alpha = 0.5) +
+  geom_point(data = ElutePrimary, aes(x = Dimension.1, y = Dimension.2), color = "green", alpha = 0.7) +
+  scale_size_manual(values = c(0.75, 1.5)) +
+  labs(color = "Localization", title = "D", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(0.8,0.2), 
+        legend.title = element_blank()) 
+
+elutewash02PCFTcount <- sum(!is.na(u2osM$ElutePCFTvsWash02PCFTbins) & u2osM$ElutePCFTvsWash02PCFT >= 3)
+
+elutewash02GRcount <- sum(!is.na(u2osM$EluteGRvsWash02GRbins) & u2osM$EluteGRvsWash02GR >= 3)
+
+eluteGRPCFTcarbcount <- sum(!is.na(u2osM$EluteGRvsElutePCFTbins) & u2osM$EluteGRvsElutePCFT >= 3)
+
+wash02GRPCFTcarbcount <- sum(!is.na(u2osM$Wash02GRvsWash02PCFTbins)& u2osM$Wash02GRvsWash02PCFT >= 3)
+```
+
+```{r}
+ggarrange(
+  p4a,
+p4b,
+p4c,
+p4d
+)
+```
+
+
+**Figure**
+Plots displaying the fold change with a 3X cut-off for A) Elute PCFT vs. W-2 PCFT (`r elutewash02GRcount` proteins), B) Elute GR vs. W-2 GR (`r elutewash02PCFTcount` proteins), C) W-2 PCFT vs. W-2 GR (`r wash02GRPCFTcarbcount` proteins), and D) Elute PTFC vs. Elute GR (`r eluteGRPCFTcarbcount` proteins).
+
+***
+
+## Mapping proteins from Extracellular Vesicle Preparations to the LOPIT Map
+
+```{r PNAS data import and wrangling, include = FALSE}
+proteins <- read.delim("1946exosome/PNAS/F8042FD_Proteins.txt", stringsAsFactors = FALSE)
+proteins <- filter(proteins, Protein.FDR.Confidence == "High" & Master == "IsMasterProtein")
+proteins$Description <- sapply(strsplit(proteins$Description, " OS"), '[', 1)
+
+u2os$inPNAS <- u2os$Accession %in% proteins$Accession
+
+sampleCols <- c("Area.F5_100K.3", "Area.F5_100K.2", "Area.F5_100K.1", "Area.F5_10K.3", "Area.F5_10K.2", "Area.F5_10K.1", 
+                "Area.F3_100K.3", "Area.F3_100K.2", "Area.F3_100K.1", "Area.F3_10K.3", "Area.F3_10K.2", "Area.F3_10K.1")
+
+iMat <- data.matrix(proteins[,sampleCols])
+
+barplot(apply(iMat, 2, function(x) sum(!is.na(x))), las = 2)
+
+## dynamic range
+meanFrame <- melt(iMat) %>%
+  mutate(category = c(rep("F5100K",3), rep("F510K", 3), rep("F3100K", 3), rep("F310K", 3))[Var2]) %>%
+  group_by(Var1, category) %>%
+  summarise(mean = mean(value)) %>%
+  dcast(Var1 ~ category, value.var = "mean") %>%
+  dplyr::select(-Var1)
+
+fcFrame <- meanFrame %>%
+  mutate(F3100KvsF310K = F3100K/F310K) %>%
+  mutate(F5100KvsF510K = F5100K/F510K) %>%
+  mutate(F3100KvsF5100K = F3100K/F5100K) %>%
+  mutate(F310KvsF510K = F310K/F510K) %>%
+  dplyr::select(F3100KvsF310K, F5100KvsF510K, F3100KvsF5100K, F310KvsF510K)
+
+proteins <- cbind(proteins, fcFrame)
+
+drFrame <- meanFrame
+for(i in 1:ncol(meanFrame)){
+  myVec <- meanFrame[,i]
+  myVec <- myVec[order(myVec, decreasing = TRUE)]
+  #myVec <- cumsum(myVec)
+  drFrame[,i] <- myVec/sum(myVec, na.rm = TRUE)
+}
+drFrame$rank <- 1:nrow(drFrame)
+
+proteins$sums <- rowSums(log10(iMat), na.rm = TRUE)
+proteins$bins <- cut(proteins$sums, breaks = quantile(proteins$sums, probs = c(0, 0.25, 0.5, 0.75, 1)))
+
+spinList <- list(c(1:3), c(4:6), c(7:9), c(10:12))
+
+spinSums <- mat.or.vec(nr = nrow(iMat), nc = length(spinList))
+spinBins <- data.frame(mat.or.vec(nr = nrow(iMat), nc = length(spinList)))
+spinSums[spinSums == 0] <- NA
+
+for (i in 1:ncol(spinSums)){
+  spinSums[,i] <- rowSums(iMat[,spinList[[i]]], na.rm = TRUE)
+  spinSums[spinSums[,i] == 0,i] <- NA
+  spinBins[,i] <- cut(spinSums[,i], breaks = quantile(spinSums[,i], probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE))
+}
+colnames(spinSums) <- c("F5100sum", "F510sum", "F3100sum", "F310sum")
+colnames(spinBins) <- c("F5100bin", "F510bin", "F3100bin", "F310bin")
+
+#apply(spinSums, 2, function(x) sum(!is.na(x)))
+
+proteins <- cbind(proteins, spinSums, spinBins)
+smallProteins <- proteins[,c("Accession", "F5100sum", "F510sum", "F3100sum", "F310sum", 
+                                       "F5100bin", "F510bin", "F3100bin", "F310bin")]
+
+```
+
+```{r PNAS plots, include = FALSE}
+
+u2osM <- left_join(u2os, dplyr::select(proteins, Accession, Description, sums, bins), by = c("Accession" = "Accession"))
+
+allPNAS <- ggplot(u2os, aes(x = Dimension.1, y = Dimension.2, color = assignment)) +
+  scale_color_manual(values = c(brewer.pal(12, "Paired"), grey(0.8, alpha = 0.1))) +
+  geom_point()+
+  geom_point(data = u2osM, aes(x = Dimension.1, y = Dimension.2),
+             color = "blue", alpha = 0.2, size = 2) +
+  theme_bw() + 
+  #ggtitle("All PNAS Protiens") +
+  theme(legend.position = "none") +
+  theme(legend.title = element_blank()) + 
+  labs(color = "Localization") +
+  xlim(c(-60, 60)) + ylim(c(-50,50))   +
+  xlab("t-SNE Dim. 1") +
+  ylab("t-SNE Dim. 2")
+
+u2osM <- left_join(u2os, smallProteins, by = c("Accession" = "Accession"))
+
+p5b <- u2osM %>%
+  mutate(identified = !is.na(u2osM$F3100bin)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$F3100bin), ], aes(x = Dimension.1, y = Dimension.2, size = F3100bin),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "B", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+u2osM %>%
+     mutate(identified = !is.na(u2osM$F3100bin)) %>%
+  filter(identified == TRUE) %>%
+    group_by(assignment) %>%
+    count()
+
+cat <- MISEV2018Mark %>% group_by(Category) %>% count()
+
+```
+
+```{r MISEV2018 plot, include = FALSE}
+u2osEV <- right_join(MISEV2018Mark, u2os, by = "Accession")
+
+ISEV <- ggplot(u2os, aes(x = Dimension.1, y = Dimension.2, color = assignment)) +
+  scale_color_manual(values = c(brewer.pal(12, "Paired"), grey(0.8, alpha = 0.1))) +
+  geom_point() +
+  geom_point(data = u2osEV, aes(x = Dimension.1, y = Dimension.2),
+             color = "blue", alpha = 0.3, size = 2) +
+  theme_bw() + 
+  theme_bw()  +
+  xlim(c(-60, 60)) + ylim(c(-50,50))+
+  theme(legend.position = "none") +
+  theme(legend.title = element_blank()) +
+  xlab("t-SNE Dim. 1") +
+  ylab("t-SNE Dim. 2")
+
+p5a <- u2osEV %>%
+  mutate(identified = !is.na(u2osEV$Category)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osEV[!is.na(u2osEV$Category), ], aes(x = Dimension.1, y = Dimension.2, color = as.factor(Category)),
+            alpha = 0.9) +
+  scale_color_manual(values = c("darkgreen", "darkgreen", "red", "orange", "darkgreen")) +
+  labs(color = "Localization", title = "A", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+```
+
+```{r Nature Data Import & Wrangling, include=FALSE}
+## import protein lists
+isoproteins <- read.delim("data_Nature_2021/proteinGroups_isolation.txt")
+cellproteins <- read.delim("data_Nature_2021/proteinGroups_cellLines.txt")
+coreproteins  <- read.csv("data_Nature_2021/core_protoeme.csv")
+## import protein lists of exosome markers and exclusion markers
+isoMarkers      <- read.csv("data_Nature_2021/protienMarkers_isolation.csv")
+isoExclusion    <- read.csv("data_Nature_2021/exclusionMarkers_isolation.csv")
+CellpropMarkers <- read.csv("data_Nature_2021/proposedBiomarkersCells.csv")
+CelllitMarkers  <- read.csv("data_Nature_2021/literatureBiomarkersCells.csv")
+CellExclusion   <- read.csv("data_Nature_2021/proposedExclusionMarkersCells.csv")
+
+## import sample tables for the protein lists
+isosampleTable  <- read.csv("data_Nature_2021/proteinGroups_isolation_sampleTable.csv")
+cellsampleTable <- read.csv("data_Nature_2021/proteinGroups_cellLines_sampleTable.csv")
+coreTable  <- read.csv("data_Nature_2021/core_protoeme_sampleTable.csv")
+
+isoproteins$Description <- sapply(strsplit(isoproteins$Protein.names, " OS"), '[', 1)
+cellproteins$Description <- sapply(strsplit(cellproteins$Protein.names, " OS"), '[', 1)
+
+isoproteins$Accession <- sapply(strsplit(isoproteins$Protein.IDs, ";"), '[', 1)
+cellproteins$Accession <- sapply(strsplit(cellproteins$Protein.IDs, ";"), '[', 1)
+
+temp <- coreproteins %>% left_join(cellproteins, by = "Protein.names")
+coreFrame<- temp[,c("Protein.names", "Accession")]
+
+u2os$inIso <- u2os$Accession %in% isoproteins$Accession
+u2os$inCell <- u2os$Accession %in% cellproteins$Accession
+u2os$inCore <- u2os$Accession %in% coreFrame$Accession
+u2osIso <- isoproteins %>%
+  inner_join(u2os, by = "Accession")
+u2osCell <- cellproteins %>%
+  right_join(u2os, by = "Accession")
+u2osIsoMark  <- isoMarkers %>%
+  inner_join(u2os, by = "Accession")
+u2osIsoExcl  <- isoExclusion %>%
+  inner_join(u2os, by = "Accession")
+u2osCellMark <- CellpropMarkers %>%
+  inner_join(u2os, by = "Accession")
+u2osCellLit  <- CelllitMarkers %>%
+  inner_join(u2os, by = "Accession")
+u2osCellExcl <- CellExclusion %>%
+  inner_join(u2os, by = "Accession")
+u2osCore <- coreFrame %>%
+  right_join(u2os, by = "Accession")
+```
+
+```{r, eval = F}
+# All protiens in the MISEV 2018 recommendation are in the core exosome data set.
+mFrame <- coreFrame %>% right_join(MISEV2018Mark, by="Accession")
+mFrame %>% 
+        dplyr::select(c("Category", "X")) %>% 
+        drop_na() %>% 
+        group_by(Category) %>% 
+        count() %>% 
+        full_join(cat, by = "Category") %>% 
+        mutate(percent = round(n.x/n.y*100,1))
+```
+
+
+```{r Nature Core Exosome Proteins Plot, include=FALSE}
+NatCore <- ggplot(u2os, aes(x = Dimension.1, y = Dimension.2, color = assignment)) +
+  scale_color_manual(values = c(brewer.pal(12, "Paired"), grey(0.8, alpha = 0.1))) +
+  geom_point() +
+  geom_point(data = u2osCore, aes(x = Dimension.1, y = Dimension.2),
+             color = "blue", alpha = 0.3, size = 2) +
+  theme_bw() + 
+  #ggtitle("Core Exosome Proteins") +
+  theme(legend.position = "none") +
+  theme(legend.title = element_blank()) + 
+  labs(color = "Localization") +
+  xlim(c(-60, 60)) + ylim(c(-50,50))   +
+  xlab("t-SNE Dim. 1") +
+  ylab("t-SNE Dim. 2")
+
+p5c <- u2osCore %>%
+  mutate(identified = u2osCore$inCore == TRUE) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osCore[u2osCore$inCore == TRUE, ], aes(x = Dimension.1, y = Dimension.2),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.375)) +
+  labs(color = "Localization", title = "C", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+```
+
+```{r All Nature plot, include=FALSE}
+AllNat <- ggplot(u2os, aes(x = Dimension.1, y = Dimension.2, color = assignment)) + 
+  scale_color_manual(values = c(brewer.pal(12, "Paired"), grey(0.8, alpha = 0.1))) +
+  geom_point() +
+  geom_point(data = u2osCell, aes(x = Dimension.1, y = Dimension.2),
+             color = "blue", alpha = 0.3, size = 2) +
+  theme_bw() + 
+  #ggtitle("Cell Proteins") +
+  theme(legend.position = "none") +
+  theme(legend.title = element_blank()) + 
+  labs(color = "Localization") +
+  xlim(c(-60, 60)) + ylim(c(-50,50))   +
+  xlab("t-SNE Dim. 1") +
+  ylab("t-SNE Dim. 2")
+
+p5d <- u2osCell %>%
+  mutate(identified = u2osCell$inCell == TRUE) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osCell[u2osCell$inCell == TRUE, ], aes(x = Dimension.1, y = Dimension.2),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.375)) +
+  labs(color = "Localization", title = "D", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none')
+```
+
+```{r}
+ggarrange(
+p5a,
+p5b,
+p5c,
+p5d  
+)
+```
+
+
+**Figure**
+A) Distribution of LOPIT localized proteins from the MISEV2018 recommendation.
+Proteins are colored by ISEV category.
+B) Distribution of LOPIT localized proteins from an exosome preparation by density gradient centrifugation (PNAS dataset). 
+C) Distribution of core exosome proteins proposed in the Nature paper. 
+D) Distribution of all exosome proteins identified in the Nature dataset. 
+Blue points indicate that the protein is in the respective dataset.
+
+
+```{r PNAS spin bins, include = FALSE}
+## repeat for different centrifuge numbers
+#colnames(iMat)
+spinList <- list(c(1:3), c(4:6), c(7:9), c(10:12))
+
+spinSums <- mat.or.vec(nr = nrow(iMat), nc = length(spinList))
+spinBins <- data.frame(mat.or.vec(nr = nrow(iMat), nc = length(spinList)))
+spinSums[spinSums == 0] <- NA
+
+for (i in 1:ncol(spinSums)){
+  spinSums[,i] <- rowSums(iMat[,spinList[[i]]], na.rm = TRUE)
+  spinSums[spinSums[,i] == 0,i] <- NA
+  spinBins[,i] <- cut(spinSums[,i], breaks = quantile(spinSums[,i], probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE))
+}
+colnames(spinSums) <- c("F5100sum", "F510sum", "F3100sum", "F310sum")
+colnames(spinBins) <- c("F5100bin", "F510bin", "F3100bin", "F310bin")
+
+#apply(spinSums, 2, function(x) sum(!is.na(x)))
+
+proteins <- cbind(proteins, spinSums, spinBins)
+smallProteins <- proteins[,c("Accession", "Description","F5100sum", "F510sum", "F3100sum", "F310sum", 
+                                       "F5100bin", "F510bin", "F3100bin", "F310bin", "F3100KvsF310K", "F5100KvsF510K", "F3100KvsF5100K", "F310KvsF510K")]
+
+smallProteins$F3100KvsF310Kbins <- cut(smallProteins$F3100KvsF310K, breaks = quantile(smallProteins$F3100KvsF310K, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+
+smallProteins$F5100KvsF510Kbins <- cut(smallProteins$F5100KvsF510K, breaks = quantile(smallProteins$F5100KvsF510K, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+
+smallProteins$F3100KvsF5100Kbins <- cut(smallProteins$F3100KvsF5100K, breaks = quantile(smallProteins$F3100KvsF5100K, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+
+smallProteins$F310KvsF510Kbins <- cut(smallProteins$F310KvsF510K, breaks = quantile(smallProteins$F310KvsF510K, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T))
+
+u2osM <- left_join(u2os, smallProteins, by = c("Accession" = "Accession"))
+```
+
+```{r PNAS fold change plots, include = FALSE}
+p6a <- u2osM %>%
+  mutate(identified = !is.na(u2osM$F3100KvsF310Kbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$F3100KvsF310Kbins), ], aes(x = Dimension.1, y = Dimension.2, size = F3100KvsF310Kbins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "A", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p6b <- u2osM %>%
+  mutate(identified = !is.na(u2osM$F5100KvsF510Kbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$F5100KvsF510Kbins), ], aes(x = Dimension.1, y = Dimension.2, size = F5100KvsF510Kbins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "B", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p6c <- u2osM %>%
+  mutate(identified = !is.na(u2osM$F3100KvsF5100Kbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$F3100KvsF5100Kbins), ], aes(x = Dimension.1, y = Dimension.2, size = F3100KvsF5100Kbins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "C", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p6d <- u2osM %>%
+  mutate(identified = !is.na(u2osM$F310KvsF510Kbins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = u2osM[!is.na(u2osM$F310KvsF510Kbins), ], aes(x = Dimension.1, y = Dimension.2, size = F310KvsF510Kbins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "D", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+F3100KvsF310Kcount <- sum(!is.na(u2osM$F3100KvsF310Kbins))
+F5100KvsF510Kcount <- sum(!is.na(u2osM$F5100KvsF510Kbins))
+F3100KvsF5100Kcount <- sum(!is.na(u2osM$F3100KvsF5100Kbins))
+F310KvsF510Kcount <- sum(!is.na(u2osM$F310KvsF510Kbins))
+```
+
+```{r}
+ggarrange(
+p6a,
+p6b,
+p6c,
+p6d
+)
+```
+
+
+**Figure**
+Displaying the fold changes between fractions for A) F3100K vs. F310K (`r F3100KvsF310Kcount` proteins), B) F5100K vs. F510K (`r F5100KvsF510Kcount` proteins), C) F3100K vs. F5100K (`r F3100KvsF5100Kcount` proteins), and D) F310K vs. F510K (`r F310KvsF510Kcount` proteins).
+
+***
+
+```{r Nature Isolation Data Wrangling, include=FALSE}
+IsoFCframe <- u2osIso %>%
+  select(Accession, contains("Intensity")) %>%
+  pivot_longer(-c(Accession)) %>%
+  inner_join(isosampleTable, by = c("name" = "Column_Name")) %>%
+  group_by(Accession, Cell_Line, Preparation_Method) %>%
+  summarise(mean =  mean(value, na.rm = TRUE)) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = c(Accession), names_from = c(Preparation_Method, Cell_Line), values_from = mean) %>%
+  mutate(DGvsUC_293T = DG_293T/UC_293T) %>%
+  mutate(SECvsUC_293T = SEC_293T/UC_293T) %>%
+  mutate(DGvsUC_MDAMB231 = DG_MDAMB231/UC_MDAMB231) %>%
+  mutate(SECvsUC_MDAMB231 = SEC_MDAMB231/UC_MDAMB231) %>%
+  mutate(DGvsUC_PANC1 = DG_PANC1/UC_PANC1) %>%
+  mutate(SECvsUC_PANC1 = SEC_PANC1/UC_PANC1) %>%
+  mutate(DGvsUC_293T_bins = cut(DGvsUC_293T, breaks =  unique(quantile(DGvsUC_293T, probs = c(0, 0.25, 0.5, 0.75, 1),na.rm=T)))) %>%
+  mutate(SECvsUC_293T_bins = cut(SECvsUC_293T, breaks =  unique(quantile(SECvsUC_293T, probs = c(0, 0.25, 0.5, 0.75, 1),na.rm=T)))) %>%
+  mutate(DGvsUC_MDAMB231_bins = cut(DGvsUC_MDAMB231, breaks =  unique(quantile(DGvsUC_MDAMB231, probs = c(0, 0.25, 0.5, 0.75, 1),na.rm=T)))) %>%
+  mutate(SECvsUC_MDAMB231_bins = cut(SECvsUC_MDAMB231, breaks =  unique(quantile(SECvsUC_MDAMB231, probs = c(0, 0.25, 0.5, 0.75, 1),na.rm=T)))) %>%
+  mutate(DGvsUC_PANC1_bins = cut(DGvsUC_PANC1, breaks =  unique(quantile(DGvsUC_PANC1, probs = c(0, 0.25, 0.5, 0.75, 1),na.rm=T)))) %>%
+  mutate(SECvsUC_PANC1_bins = cut(SECvsUC_PANC1, breaks =  unique(quantile(SECvsUC_PANC1, probs = c(0, 0.25, 0.5, 0.75, 1),na.rm=T)))) %>%
+  right_join(u2os, by = "Accession")
+```
+
+```{r Isolation plots, include=FALSE}
+p7a <- IsoFCframe %>%
+  mutate(identified = !is.na(IsoFCframe$SECvsUC_293T_bins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = IsoFCframe[!is.na(IsoFCframe$SECvsUC_293T_bins), ], aes(x = Dimension.1, y = Dimension.2, size = SECvsUC_293T_bins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "A", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p7b <- IsoFCframe %>%
+  mutate(identified = !is.na(IsoFCframe$DGvsUC_293T_bins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = IsoFCframe[!is.na(IsoFCframe$DGvsUC_293T_bins), ], aes(x = Dimension.1, y = Dimension.2, size = DGvsUC_293T_bins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "B", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p7c <- IsoFCframe %>%
+  mutate(identified = !is.na(IsoFCframe$SECvsUC_MDAMB231_bins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = IsoFCframe[!is.na(IsoFCframe$SECvsUC_MDAMB231_bins), ], aes(x = Dimension.1, y = Dimension.2, size = SECvsUC_MDAMB231_bins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "C", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p7d <- IsoFCframe %>%
+  mutate(identified = !is.na(IsoFCframe$DGvsUC_MDAMB231_bins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = IsoFCframe[!is.na(IsoFCframe$DGvsUC_MDAMB231_bins), ], aes(x = Dimension.1, y = Dimension.2, size = DGvsUC_MDAMB231_bins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "D", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p7e <- IsoFCframe %>%
+  mutate(identified = !is.na(IsoFCframe$SECvsUC_PANC1_bins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = IsoFCframe[!is.na(IsoFCframe$SECvsUC_PANC1_bins), ], aes(x = Dimension.1, y = Dimension.2, size = SECvsUC_PANC1_bins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "E", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+p7f <- IsoFCframe %>%
+  mutate(identified = !is.na(IsoFCframe$DGvsUC_PANC1_bins)) %>%
+  ggplot(aes(x = Dimension.1, y = Dimension.2)) +
+  geom_point(data = function(x){x[!(x$identified), ]}, color = grey(0.9)) +
+  geom_point(data = IsoFCframe[!is.na(IsoFCframe$DGvsUC_PANC1_bins), ], aes(x = Dimension.1, y = Dimension.2, size = DGvsUC_PANC1_bins),
+             color = "blue", alpha = 0.2) +
+  scale_size_manual(values = c(0.18, 0.375, .75, 1.5)) +
+  labs(color = "Localization", title = "F", x = "t-SNE Dim. 1", y = "t-SNE Dim. 2") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none') 
+
+DGvsUC_293Tcount <- sum(!is.na(IsoFCframe$DGvsUC_293T_bins))
+SECvsUC_293Tcount <- sum(!is.na(IsoFCframe$SECvsUC_293T_bins))
+DGvsUC_MDAMB231count <- sum(!is.na(IsoFCframe$DGvsUC_MDAMB231_bins))
+SECvsUC_MDAMB231count <- sum(!is.na(IsoFCframe$SECvsUC_MDAMB231_bins))
+DGvsUC_PANC1count <- sum(!is.na(IsoFCframe$DGvsUC_PANC1_bins))
+SECvsUC_PANC1count <- sum(!is.na(IsoFCframe$SECvsUC_PANC1_bins))
+```
+
+```{r, eval = F}
+IsoFCframe %>%
+     mutate(identified = !is.na(IsoFCframe$SECvsUC_PANC1_bins)) %>%
+     filter(identified == TRUE) %>%
+     group_by(assignment) %>%
+     count()
+```
+
+
+```{r Figure 7}
+#ggsave(p7a, file = "output/Figure_7A.svg", height = 2.5, width = 3)
+#ggsave(p7b, file = "output/Figure_7B.svg", height = 2.5, width = 3)
+#ggsave(p7c, file = "output/Figure_7C.svg", height = 2.5, width = 3)
+#ggsave(p7d, file = "output/Figure_7D.svg", height = 2.5, width = 3)
+#ggsave(p7e, file = "output/Figure_7E.svg", height = 2.5, width = 3)
+#ggsave(p7f, file = "output/Figure_7F.svg", height = 2.5, width = 3)
+```
+
+```{r}
+ggarrange(
+p7a,
+p7b,
+p7c,
+p7d,
+p7e,
+p7f
+)
+```
+
+
+**Figure**
+Displaying fold changes for A) SEC vs. UC 293T (`r SECvsUC_293Tcount` proteins), B) DG vs. UC 293T (`r DGvsUC_293Tcount` proteins), C) SEC vs. UC MDAMB231 (`r SECvsUC_MDAMB231count` proteins), D) DG vs. UC MDAMB231 (`r DGvsUC_MDAMB231count` proteins), E) SEC vs. UC PANC1 (`r SECvsUC_PANC1count` proteins), and F) DG vs. UC PANC1 (`r DGvsUC_PANC1count` proteins).
+***
+
